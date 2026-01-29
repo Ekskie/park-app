@@ -9,7 +9,11 @@
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.parkapp.parkalert",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -21,13 +25,13 @@
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "permissions": [
-      "INTERNET",
-      "READ_EXTERNAL_STORAGE",
-      "WRITE_EXTERNAL_STORAGE",
-      "CAMERA"
-    ],
-    "package": "com.parkapp.parkalert",
-    "versionCode": 1
+        "INTERNET",
+        "READ_EXTERNAL_STORAGE",
+        "WRITE_EXTERNAL_STORAGE",
+        "CAMERA"
+      ],
+      "package": "com.parkapp.parkalert",
+      "versionCode": 1
     },
     "web": {
       "output": "static",
@@ -62,9 +66,9 @@
     "extra": {
       "router": {},
       "eas": {
-        "projectId": "62b7fcca-3569-4f74-972b-6b58d9e54b5c"
+        "projectId": "e7d23c26-cb41-40bc-8a4d-a4e3beec96c0"
       }
     },
-    "owner": "adr143"
+    "owner": "ekskie21s-organization"
   }
 }
