@@ -164,16 +164,13 @@ export default function VideoUpload() {
       // Bypass Ngrok browser warning for XHR
       xhr.setRequestHeader("ngrok-skip-browser-warning", "true");
 
-      // 1. Monitor Upload Progress
-      xhr.upload.onprogress = (event) => {
-        if (event.lengthComputable) {
-          const progress = Math.round((event.loaded / event.total) * 100);
-          setUploadProgress(progress);
-        }
-      };
+      let pollingStarted = false;
 
-      // 2. When Upload finishes, Start Polling for Processing Status
-      xhr.upload.onloadend = () => {
+      // Helper to start polling only once
+      const startPolling = () => {
+        if (pollingStarted) return;
+        pollingStarted = true;
+
         setProcessing(true); // Show processing UI
         setUploadProgress(100); // Ensure upload shows full
 
@@ -198,6 +195,34 @@ export default function VideoUpload() {
             console.log("Polling error:", e);
           }
         }, 1000);
+      };
+
+      // 1. Monitor Upload Progress
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) {
+          const progress = Math.round((event.loaded / event.total) * 100);
+          setUploadProgress(progress);
+        }
+      };
+
+      // 2. Triggers for Polling (Redundant to ensure Android works)
+      xhr.upload.onloadstart = () => {
+        // Just ensuring state is clean
+      };
+
+      xhr.upload.onload = () => {
+        startPolling();
+      };
+
+      xhr.upload.onloadend = () => {
+        startPolling();
+      };
+
+      // Fallback: If readyState is headers_received (2) or loading (3), upload is done.
+      xhr.onreadystatechange = () => {
+        if (xhr.readyState >= 2 && !pollingStarted) {
+          startPolling();
+        }
       };
 
       xhr.onload = () => {
@@ -405,7 +430,7 @@ export default function VideoUpload() {
 
           {/* Processing Progress Indicator (Shows after upload finishes) */}
           {processing && (
-            <View style={{ marginVertical: 20 }}>
+            <View style={styles.processingContainer}>
               <View
                 style={{
                   flexDirection: "row",
@@ -414,7 +439,7 @@ export default function VideoUpload() {
                 }}
               >
                 <ActivityIndicator
-                  size="small"
+                  size={Platform.OS === "android" ? "large" : "small"}
                   color="#007BFF"
                   style={{ marginRight: 10 }}
                 />
@@ -545,6 +570,18 @@ const styles = StyleSheet.create({
     overflow: "hidden",
   },
   progressFill: { height: "100%", backgroundColor: "#007BFF" },
+  processingContainer: {
+    marginVertical: 20,
+    backgroundColor: "#fff",
+    padding: 15,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#e0e0e0",
+    shadowColor: "#000",
+    shadowOpacity: 0.05,
+    shadowRadius: 3,
+    elevation: 1,
+  },
   detailsContainer: {
     backgroundColor: "#fff",
     borderRadius: 18,

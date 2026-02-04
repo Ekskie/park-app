@@ -1,16 +1,33 @@
-from flask import Flask, request, send_file, jsonify, url_for
-from flask_cors import CORS
+import eventlet
+# Monkey patch to ensure standard library sockets work with Eventlet
+eventlet.monkey_patch()
+
+from flask import Flask, request, send_file, jsonify, url_for, make_response
+from flask_cors import CORS, cross_origin # Added cross_origin
+from flask_socketio import SocketIO, emit
 import os
 import cv2
 import time
 import json
 import numpy as np
+import base64
 from ultralytics import YOLO
 from supabase import create_client, Client
 
 app = Flask(__name__)
-# Enable CORS for all routes and origins
-CORS(app, resources={r"/*": {"origins": "*"}})
+
+# [FIX] Enable CORS with specific allowance for Ngrok headers
+CORS(app, resources={r"/*": {"origins": "*"}}, allow_headers=["*", "ngrok-skip-browser-warning"], methods=["GET", "POST", "OPTIONS"])
+
+# Initialize SocketIO with Eventlet
+socketio = SocketIO(
+    app, 
+    cors_allowed_origins="*", 
+    async_mode='eventlet', 
+    ping_timeout=120, 
+    ping_interval=30,
+    transports=['websocket'] 
+)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
@@ -35,6 +52,16 @@ processing_status = {
     "status": "idle"
 }
 
+# ==========================================
+#  Global Tracking State (For Real-Time)
+# ==========================================
+rt_object_times = {} 
+rt_registered_objects = set()
+is_processing_frame = False 
+
+STAY_THRESHOLD = 20
+FRAME_SKIP = 5 
+
 def load_ngrok_url() -> str:
     try:
         with open(NGROK_CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -48,14 +75,116 @@ NGROK_URL = load_ngrok_url()
 model = YOLO(os.path.join(BASE_DIR, "vehicle_model.pt"))
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-STAY_THRESHOLD = 20
-FRAME_SKIP = 5 
+# [FIX] Manually handle OPTIONS requests to satisfy Ngrok/Browser preflights
+@app.before_request
+def handle_options_request():
+    if request.method == "OPTIONS":
+        response = make_response()
+        response.headers.add("Access-Control-Allow-Origin", "*")
+        response.headers.add("Access-Control-Allow-Headers", "Content-Type,Authorization,ngrok-skip-browser-warning")
+        response.headers.add("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
+        return response
+
+# ==========================================
+#  Real-Time WebSocket Handlers
+# ==========================================
+
+@socketio.on('connect')
+def handle_connect():
+    print('🟢 Client connected to WebSocket')
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    global is_processing_frame
+    is_processing_frame = False
+    print("🔴 Client disconnected")
+
+@socketio.on('frame')
+def handle_frame(data):
+    global is_processing_frame, rt_object_times, rt_registered_objects
+
+    if is_processing_frame:
+        return
+
+    is_processing_frame = True
+
+    try:
+        if ',' in data:
+            encoded_data = data.split(',')[1]
+        else:
+            encoded_data = data
+            
+        nparr = np.frombuffer(base64.b64decode(encoded_data), np.uint8)
+        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+        if frame is None:
+            return
+
+        frame = cv2.resize(frame, (640, 360))
+        current_timestamp = time.time()
+
+        results = model.track(frame, persist=True, verbose=False)
+        
+        frame_has_violation = False
+
+        if results and results[0].boxes.id is not None:
+            ids = results[0].boxes.id.cpu().numpy()
+            boxes = results[0].boxes.xyxy.cpu().numpy()
+            
+            for box, track_id in zip(boxes, ids):
+                x1, y1, x2, y2 = map(int, box)
+                track_id = int(track_id)
+                
+                if track_id not in rt_object_times:
+                    rt_object_times[track_id] = { 
+                        "first_seen": current_timestamp, 
+                        "last_seen": current_timestamp 
+                    }
+                else:
+                    rt_object_times[track_id]["last_seen"] = current_timestamp
+                
+                duration = rt_object_times[track_id]["last_seen"] - rt_object_times[track_id]["first_seen"]
+                
+                is_violation = False
+                if duration >= STAY_THRESHOLD:
+                    is_violation = True
+                    rt_registered_objects.add(track_id)
+                    frame_has_violation = True
+                
+                color = (0, 0, 255) if is_violation else (0, 255, 0)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                
+                status_text = "VIOLATION" if is_violation else "PARKED"
+                label = f"ID {track_id} | {duration:.1f}s | {status_text}"
+                
+                (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                cv2.rectangle(frame, (x1, y1 - 20), (x1 + w, y1), color, -1)
+                cv2.putText(frame, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+        _, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 50])
+        frame_b64 = base64.b64encode(buffer).decode('utf-8')
+        
+        emit('response', {
+            'image': f"data:image/jpeg;base64,{frame_b64}",
+            'violation': frame_has_violation,
+            'total_violations': len(rt_registered_objects)
+        })
+        
+    except Exception as e:
+        print(f"Real-time processing error: {e}")
+    finally:
+        is_processing_frame = False
+
+# ==========================================
+#  Existing HTTP Routes (Upload, etc.)
+# ==========================================
 
 @app.route('/progress', methods=['GET'])
+@cross_origin() # [FIX] Explicitly allow CORS for this route
 def get_progress():
     return jsonify(processing_status)
 
-@app.route('/upload', methods=['POST'])
+@app.route('/upload', methods=['POST', 'OPTIONS'])
 def upload_video():
     global processing_status
     try:
@@ -90,12 +219,13 @@ def upload_video():
         object_times = {}
         registered_objects = set()
         current_frame = 0
-        snapshot_frame = None
-        last_detections = [] 
-
+        
         print(f"Starting processing: {total_frames} frames. Skip rate: {FRAME_SKIP}")
 
         while True:
+            # [CRITICAL FIX] Yield to event loop to allow /progress requests
+            eventlet.sleep(0)
+
             ret, frame = cap.read()
             if not ret:
                 break
@@ -108,7 +238,6 @@ def upload_video():
 
             if current_frame % FRAME_SKIP == 0 or current_frame == 1:
                 results = model.track(frame, persist=True, verbose=False)
-                last_detections = [] 
                 
                 if results and results[0].boxes.id is not None:
                     ids = results[0].boxes.id.cpu().numpy()
@@ -129,26 +258,12 @@ def upload_video():
                             is_violation = True
                             registered_objects.add(track_id)
                         
-                        last_detections.append({
-                            "coords": (x1, y1, x2, y2),
-                            "id": track_id,
-                            "duration": duration,
-                            "violation": is_violation
-                        })
-                    
-                    snapshot_frame = frame.copy()
-
-            for det in last_detections:
-                x1, y1, x2, y2 = det["coords"]
-                color = (0, 0, 255) if det["violation"] else (0, 255, 0)
-                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                label = f"ID {int(det['id'])} | {det['duration']:.1f}s"
-                cv2.putText(frame, label, (x1, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+                        color = (0, 0, 255) if is_violation else (0, 255, 0)
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                        label = f"ID {int(track_id)} | {duration:.1f}s"
+                        cv2.putText(frame, label, (x1, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
 
             out.write(frame)
-
-            if current_frame % 30 == 0:
-                print(f"Processed {current_frame}/{total_frames} frames...")
 
         cap.release()
         out.release()
@@ -156,15 +271,13 @@ def upload_video():
         processing_status["status"] = "completed"
         processing_status["progress"] = 100
 
-        snapshot_url = None
-        if snapshot_frame is not None:
-            snapshot_path = os.path.join(PROCESSED_FOLDER, "snapshot.jpg")
-            cv2.imwrite(snapshot_path, snapshot_frame)
-            base = NGROK_URL or "http://localhost:5000"
-            snapshot_url = f"{base}/processed_snapshot"
+        snapshot_path = os.path.join(PROCESSED_FOLDER, "snapshot.jpg")
+        if 'frame' in locals():
+            cv2.imwrite(snapshot_path, frame)
 
         base = NGROK_URL or "http://localhost:5000"
         video_url = f"{base}/processed_video_file"
+        snapshot_url = f"{base}/processed_snapshot"
 
         return jsonify({
             "tracked_objects": len(registered_objects),
@@ -188,21 +301,10 @@ def get_processed_video_file():
     if not os.path.exists(output_path):
         return jsonify({"error": "No processed video found"}), 404
     
-    # -------------------------------------------------------------
-    # CRITICAL FIX FOR "net err_blocked_by_orb"
-    # -------------------------------------------------------------
     response = send_file(output_path, mimetype="video/mp4")
-    
-    # Allow any origin (browser/mobile) to access this resource
     response.headers["Access-Control-Allow-Origin"] = "*"
-    
-    # Tell the browser this is a safe cross-origin resource
-    # 'cross-origin' allows it to be served to pages from different origins (like your frontend)
     response.headers["Cross-Origin-Resource-Policy"] = "cross-origin"
-    
-    # Disable sniffing to force browser to respect video/mp4 mimetype
     response.headers["X-Content-Type-Options"] = "nosniff"
-    
     return response
 
 @app.route('/processed_snapshot')
@@ -212,13 +314,10 @@ def get_processed_snapshot():
         return jsonify({"error": "No snapshot found"}), 404
     
     response = send_file(snapshot_path, mimetype="image/jpeg")
-    
-    # Same headers for images to prevent ORB blocking
     response.headers["Access-Control-Allow-Origin"] = "*"
     response.headers["Cross-Origin-Resource-Policy"] = "cross-origin"
     response.headers["X-Content-Type-Options"] = "nosniff"
-    
     return response
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    socketio.run(app, host='0.0.0.0', port=5000, debug=False)
