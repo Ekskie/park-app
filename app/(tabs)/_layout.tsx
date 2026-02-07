@@ -1,9 +1,10 @@
-import { supabase } from "@/lib/supabase";
 import { FontAwesome5 } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Tabs, useRouter } from "expo-router";
+import * as Updates from "expo-updates";
 import React from "react";
 import { Alert, Button, Platform } from "react-native";
+import { supabase } from "../../lib/supabase";
 
 export default function TabLayout() {
   const router = useRouter();
@@ -16,14 +17,18 @@ export default function TabLayout() {
       // 2. Clear all local storage keys used in the app
       await AsyncStorage.removeItem("user_id");
       await AsyncStorage.removeItem("userRole");
-      // Clear potential legacy keys from your snippet
+      // Clear potential legacy keys
       await AsyncStorage.removeItem("userId");
       await AsyncStorage.removeItem("userEmail");
 
-      // 3. Navigate back to the login screen
-      router.replace("/");
+      // 3. Reload the app to ensure a completely clean state.
+      // This forces the app to reload the bundle, clearing all in-memory state (Auth Guard, variables, etc.)
+      // and restarting at the entry point (Login Screen).
+      await Updates.reloadAsync();
     } catch (err: any) {
-      Alert.alert("Error", "Failed to logout: " + err.message);
+      // Fallback if reload fails (e.g. in some dev environments)
+      Alert.alert("Logout", "You have been logged out.");
+      router.replace("/");
     }
   };
 
@@ -48,7 +53,7 @@ export default function TabLayout() {
       }}
     >
       <Tabs.Screen
-        name="index"
+        name="home"
         options={{
           title: "Home",
           tabBarIcon: ({ color }) => (
@@ -62,6 +67,15 @@ export default function TabLayout() {
           title: "Detect",
           tabBarIcon: ({ color }) => (
             <FontAwesome5 name="camera" size={24} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="realtime_detect"
+        options={{
+          title: "Realtime",
+          tabBarIcon: ({ color }) => (
+            <FontAwesome5 name="video" size={24} color={color} />
           ),
         }}
       />

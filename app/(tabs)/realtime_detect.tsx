@@ -3,19 +3,20 @@ import { supabase } from "@/lib/supabase";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import dayjs from "dayjs";
 import { CameraView, useCameraPermissions } from "expo-camera";
+import * as ImageManipulator from "expo-image-manipulator"; // Import ImageManipulator
 import React, { useEffect, useRef, useState } from "react";
 import {
-    ActivityIndicator,
-    Alert,
-    Image,
-    KeyboardAvoidingView,
-    Platform,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View,
+  ActivityIndicator,
+  Alert,
+  Image,
+  KeyboardAvoidingView,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import io from "socket.io-client";
@@ -105,16 +106,32 @@ export default function RealtimeDetect() {
     if (cameraRef.current && isConnected && !isSending.current) {
       try {
         isSending.current = true;
+
+        // 1. Capture the photo WITHOUT base64 first (faster)
         const photo = await cameraRef.current.takePictureAsync({
-          base64: true,
-          quality: 0.2,
+          quality: 0.5,
+          skipProcessing: true, // Don't process internally, we'll do it with Manipulator
         });
 
-        if (photo?.base64) {
-          if (photo.base64.length > 1000000) {
-            console.warn(`Frame skipped: Too large`);
-          } else {
-            socket.emit("frame", `data:image/jpeg;base64,${photo.base64}`);
+        if (photo?.uri) {
+          // 2. Normalize Orientation & Resize
+          // ImageManipulator automatically handles EXIF orientation (fixing the rotation issue)
+          // Resizing to width 640 is standard for YOLO and reduces bandwidth by ~80%
+          const manipulated = await ImageManipulator.manipulateAsync(
+            photo.uri,
+            [{ resize: { width: 640 } }],
+            {
+              compress: 0.6,
+              format: ImageManipulator.SaveFormat.JPEG,
+              base64: true,
+            },
+          );
+
+          if (manipulated.base64) {
+            socket.emit(
+              "frame",
+              `data:image/jpeg;base64,${manipulated.base64}`,
+            );
           }
         }
       } catch (e) {
@@ -122,12 +139,13 @@ export default function RealtimeDetect() {
       } finally {
         setTimeout(() => {
           isSending.current = false;
-        }, 100);
+        }, 100); // 10fps cap
       }
     }
   };
 
   useEffect(() => {
+    // Send frames periodically
     const interval = setInterval(sendFrame, 1000);
     return () => clearInterval(interval);
   }, [isConnected]);
@@ -218,7 +236,7 @@ export default function RealtimeDetect() {
                   StyleSheet.absoluteFill,
                   hasViolation && styles.violationBorder,
                 ]}
-                resizeMode="contain"
+                resizeMode="contain" // Ensures the bounding boxes align with the view
               />
             )}
 
